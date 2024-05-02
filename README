@@ -5,3 +5,10 @@ contains all the evals not available at lm-eval-harness and layer wise inference
 one of the goals for this repository in the future would be to capitalize on
 MFU (model flops utlization) and the other to come up with newer evals in order
 to make the models humble again 
+
+MFU = (observed token/s) / theoretical limit 
+for decoder only models a good approximation for theoritical maximum is 6N
+(matmul flops/token) + 6LH(2QT) for self attetntion where L,H,Q and T stands
+for number of layers, number of heads, head dim and sequence length respec.
+
+The very first task would be to figure out how to get ~70% MFU 
