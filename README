@@ -15,4 +15,4 @@ The very first task would be to figure out how to get ~70% MFU
 
 How does transformers work?
 
-
+Following CUDAMORE tutorials and writing some triton kernels 
