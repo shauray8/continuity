@@ -1,0 +1,20 @@
+version: "1.0"
+name: "Animeflux"
+
+base_model:
+  build:
+    modelfile: examples/Modelfile
+  loras:
+    - animelora
+  controlnets:
+    - mlsd_controlnet
+
+animelora:
+  type: lora
+  build:
+    modelfile: examples/loras/Modelfile
+
+mlsd_controlnet:
+  type: controlnet
+  build:
+    modelfile: examples/controlnet/Modelfile
