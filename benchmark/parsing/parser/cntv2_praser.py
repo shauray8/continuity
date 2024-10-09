@@ -235,8 +235,8 @@ def parse_yaml_config(filename):
     return config
 
 def benchmark_parsers():
-    toml_file = './config_files/configv2.cnt'
-    yaml_file = './config_files/config.yaml'
+    toml_file = '../config_files/configv2.cnt'
+    yaml_file = '../config_files/config.yaml'
 
     # Benchmark TOML parser
     start_time = time.time()
