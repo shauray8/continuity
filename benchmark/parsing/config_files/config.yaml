@@ -1,0 +1,57 @@
+BASIC:
+  model: FLUX.1-dev
+  use_memory_efficient_attention: true
+
+LORA_ADAPTERS:
+  - name: adapter1
+    strength: 0.5
+    path: path/to/lora1
+  - name: adapter2
+    strength: 0.3
+    path: path/to/lora2
+  - name: adapter3
+    strength: 0.2
+    path: path/to/lora3
+
+CONTROLNETS:
+  - name: depth_map
+    conditioning_scale: 0.8
+    path: path/to/depth_map
+  - name: semantic_segment
+    conditioning_scale: 0.4
+    path: path/to/semantic_segment
+  - name: normal_map
+    conditioning_scale: 0.6
+    path: path/to/normal_map
+
+PIPELINE:
+  scheduler: FlowMatchEulerDiscreteScheduler
+  text_encoder: openai/clip-vit-large-patch14
+  text_encoder_2: google/t5-v1_1-xxl
+  tokenizer: clip-vit-large-patch14
+  tokenizer_2: t5-v1_1-xxl
+  transformer: black-forest-labs/FLUX.1-dev
+
+QUANTIZATION:
+  dtype: float16
+  quantization: NF4
+  cpu_offload_gb: 8
+  swap_space: true
+  spasify: true
+
+GPU_PARALLELISM:
+  tensor_parallel_size: 2
+  gpu_memory_utilization: 0.7
+  pipeline_parallel_size: 4
+  disable_custom_all_reduce: false
+
+SCHEDULER:
+  scheduler_steps: 100
+  scheduler_config:
+    noise_type: gaussian
+    step_size: 0.05
+    step_interpolation: linear
+
+OUTPUT:
+  intermediate_layer_outputs: true
+

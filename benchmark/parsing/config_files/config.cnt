@@ -1,0 +1,49 @@
+# Diffusion Model Configuration
+
+model = "FLUX"
+
+# LoRA Adapters with file location and strength
+[[lora_adapters]]
+file = "path/to/lora_adapter_1"
+strength = 0.5
+
+[[lora_adapters]]
+file = "path/to/lora_adapter_2"
+strength = 0.8
+
+# ControlNet Conditions with file location and strength
+[[controlnet]]
+file = "path/to/controlnet_condition_1"
+strength = 0.7
+
+[[controlnet]]
+file = "path/to/controlnet_condition_2"
+strength = 0.9
+
+use_memory_efficient_attention = true
+
+scheduler = "FlowMatchEulerDiscreteScheduler"
+text_encoders = ["openai/clip-vit-large-patch14", "google/t5-v1_1-xxl"]
+tokenizers = ["tokenizer_1", "tokenizer_2"]
+
+intermediate_layer_outputs = true
+
+# Quantization and Memory Management
+dtype = "float16"
+quantization = "NF4"
+cpu_offload_gb = 8
+swap_space = 16
+
+# GPU & Parallelism
+tensor_parallel_size = 2
+gpu_memory_utilization = 0.8
+pipeline_parallel_size = 2
+disable_custom_all_reduce = false
+
+# Scheduler Parameters
+scheduler_steps = 100
+[scheduler_config]
+noise_type = "gaussian"
+step_size = 0.01
+interpolation = "linear"
+
