@@ -1,0 +1,49 @@
+version: "1.0"
+name: "YourModelName"
+
+base_model:
+  build:
+    modelfile: examples/Modelfile
+    model: FLUX
+    use_memory_efficient_attention: true
+    dtype: float16
+    quantization: "8-bit"
+    cpu_offload_gb: 8
+    swap_space: 16
+  loras:
+    - animelora
+  controlnets:
+    - mlsd_controlnet
+
+animelora:
+  type: lora
+  build:
+    modelfile: examples/loras/Modelfile
+
+mlsd_controlnet:
+  type: controlnet
+  build:
+    modelfile: examples/controlnet/Modelfile
+    options:
+      depth_maps: true
+      semantic_segments: true
+
+pipeline_parameters:
+  scheduler: "FlowMatchEulerDiscreteScheduler"
+  intermediate_layer_outputs: true
+  sampling_steps: 50
+  scheduler_type: "DDIM"
+  seed: 12345
+
+scheduler_parameters:
+  scheduler_steps: 1000
+  scheduler_config:
+    noise_type: "gaussian"
+    step_size: 0.01
+    interpolation_method: "linear"
+
+gpu_configuration:
+  tensor_parallel_size: 4
+  gpu_memory_utilization: 0.9
+  pipeline_parallel_size: 2
+  disable_custom_all_reduce: false
