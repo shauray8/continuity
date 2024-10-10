@@ -1,82 +1,71 @@
 import torch
-import torch.nn as nn
-import time
-from torch import Tensor
-import triton
-import triton.language as tl
+import torch.cuda
 
-
-def swish(x: Tensor) -> Tensor:
-    return x * torch.sigmoid(x)
-
-@triton.jit
-def swish_kernel(x_ptr, output_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
-    pid = tl.program_id(axis=0)
-    block_start = pid * BLOCK_SIZE
-    offsets = block_start + tl.arange(0, BLOCK_SIZE)
-    mask = offsets < n_elements
-    
-    x = tl.load(x_ptr + offsets, mask=mask)
-    output = 1 / (1 + tl.exp(-x))
-    tl.store(output_ptr + offsets, output, mask=mask)
-
-# Kernel launch function
-def launch_swish(x, output):
-    BLOCK_SIZE = 1024  # or another appropriate value
-    n_element=x.numel()
-    grid = (n_element + BLOCK_SIZE - 1) // BLOCK_SIZE  # Calculate grid size
-    swish_kernel[grid](x, output, x.numel(), BLOCK_SIZE=BLOCK_SIZE)
-
-# Define the original ResnetBlock
-class ResnetBlock(nn.Module):
-    def __init__(self, in_channels: int, out_channels: int):
+# Copied from https://github.com/black-forest-labs/flux/blob/main/src/flux/modules/autoencoder.py:DiagonalGaussianOriginal
+class DiagonalGaussianOriginal(nn.Module):
+    def __init__(self, sample: bool = True, chunk_dim: int = 1):
         super().__init__()
-        self.in_channels = in_channels
-        self.out_channels = out_channels if out_channels is not None else in_channels
+        self.sample = sample
+        self.chunk_dim = chunk_dim
 
-        self.norm1 = nn.GroupNorm(num_groups=32, num_channels=in_channels, eps=1e-6, affine=True)
-        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=1, padding=1)
-        self.norm2 = nn.GroupNorm(num_groups=32, num_channels=out_channels, eps=1e-6, affine=True)
-        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1)
-        if self.in_channels != self.out_channels:
-            self.nin_shortcut = nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=1, padding=0)
+    def forward(self, z: torch.Tensor) -> torch.Tensor:
+        mean, logvar = torch.chunk(z, 2, dim=self.chunk_dim)
+        if self.sample:
+            std = torch.exp(0.5 * logvar)
+            return mean + std * torch.randn_like(mean)
+        else:
+            return mean
 
-    def forward(self, x):
-        h = x
-        h = self.norm1(h)
-        h = swish(h)  # Swish activation
-        launch_swish(h,h)
-        h = self.conv1(h)
+class FastDiagonalGaussian(nn.Module):
+    def __init__(self, sample: bool = True, chunk_dim: int = 1):
+        super().__init__()
+        self.sample = sample
+        self.chunk_dim = chunk_dim
+        self.stream = torch.cuda.Stream()
 
-        h = self.norm2(h)
-        launch_swish(h,h)
-        h = self.conv2(h)
+    def forward(self, z: torch.Tensor) -> torch.Tensor:
+        mean, logvar = torch.chunk(z, 2, dim=self.chunk_dim)
+        if self.sample:
+            std = torch.exp(0.5 * logvar)
+            with torch.cuda.stream(self.stream):
+                noise = torch.randn_like(mean, memory_format=torch.preserve_format)
+                return mean + std * noise
+        return mean
 
-        if self.in_channels != self.out_channels:
-            x = self.nin_shortcut(x)
+class AutoEncoder(torch.nn.Module):
+    def __init__(self, params: AutoEncoderParams):
+        super().__init__()
+        self.encoder=Encoder(
+            resolution=params.resolution,
+            in_channels=params.in_channels,
+            ch=params.ch,
+            ch_mult=params.ch_mult,
+            num_res_blocks=params.num_res_blocks,
+            z_channels=params.z_channels,
+        )
 
-        return x + h
+        self.decoder=Decoder(
+            resolution=params.resolution,
+            in_channels=params.in_channels,
+            ch=params.ch,
+            out_ch=params.out_ch,
+            ch_mult=params.ch_mult,
+            num_res_blocks=params.num_res_blocks,
+            z_channels=params.z_channels,
+        )
+        self.reg=FastDiogonalGaussian()
 
+        self.scale_factor=params.scale_factor
+        self.shift_factor=params.shift_factor
 
-# Define the Triton-optimized ResnetBlock (you can use the implementation from the previous response here)
+    def encode(self, x: torch.Tensor) -> torch.Tensor:
+        x=self.reg(self.encoder(x))
+        return self.scale_factor*(x-self.shift_factor)
 
-# Benchmarking function
-def benchmark(model, input_tensor, num_iterations=100):
-    model.eval()  # Set the model to evaluation mode
-    with torch.no_grad():  # Disable gradient computation
-        start_time = time.time()
-        for _ in range(num_iterations):
-            model(input_tensor)
-        end_time = time.time()
-    return (end_time - start_time) / num_iterations
+    def decode(self, x:torch.Tensor) -> torch.Tensor:
+        x=x/self.scale_factor+self.shift_factor
+        return self.decoder(x)
 
-# Create a test dataset
-batch_size = 32
-input_tensor = torch.randn(batch_size, 64, 32, 32)  # Example input size
-original_model = ResnetBlock(64, 128).cuda()  # Use CUDA for GPU acceleration
-# Assuming TritonResnetBlock is defined as per the previous example
-# triton_model = TritonResnetBlock(64, 128).cuda()  # Uncomment when Triton model is ready
+    def forward(self, x:torch.Tensor) -> torch.Tensor:
+        return self.decode(self.encoder(x))
 
-# Benchmark original model
-original_time = benchmark(original_model.cuda(), input_tensor.cuda())
-print(f"Original ResnetBlock average time: {original_time:.6f} seconds")
