@@ -1,10 +1,13 @@
 import itertools
 import warnings
 from contextlib import contextmanager
-from dataclasses import dataclass
-from typing import Any, ClassVar, Dict, List, Optional, Sequence, Tuple, Union, cast, overload
+from dataclasses import dataclass, field
+from typing import (
+    Any, Dict, List, Optional, Sequence, Tuple, Union, Callable, TypeVar, cast
+)
 
 from tqdm import tqdm
+from collections import Counter
 
 logger = init_logger(__name__)
 
@@ -52,7 +55,6 @@ class Diffusion:
             scheduler_config: Contains additional configuration for the diffusion steps such as the noise type, step size, and step interpolation methods (e.g., linear vs. quadratic schedules).
 
     """
-
     def __init__(
         self,
         model: str,
@@ -60,34 +62,33 @@ class Diffusion:
         controlnet_model: Optional[str] = None,
         use_memory_efficient_attention: bool = False,
         scheduler: Optional[str] = None,
-        text_encoder: Optiional[str] = None,
-        text_encoder_2: Optiional[str] = None,
-        tokenizer: Optiional[str] = None,
-        tokenizer_2: Optiional[str] = None,
+        text_encoder: Optional[str] = None,
+        text_encoder_2: Optional[str] = None,
+        tokenizer: Optional[str] = None,
+        tokenizer_2: Optional[str] = None,
         intermediate_layer_outputs: bool = False,
         dtype: Optional[str] = "fp16",
         quantization: Optional[str] = None,
-        cpu_offload_gb: Optional[int] = 0
+        cpu_offload_gb: Optional[int] = 0,
         swap_space: Optional[str] = None,
-        tensor_parallel_size: Optional[int] = 1,
+        tensor_parallel_size: int = 1,
         gpu_memory_utilization: Optional[str] = None,
-        pipeline_parallel_size: Optional[str] = None,
-        disable_custom_all_reduce: Optional[bool] = False,
-        sampling_steps: Optional[str] = None, 
-        scheduler_type: Optinal[str] = None,
-        seed: Optional[int] = 1,
-        scheduler_steps: Optional[int] = 1000,
+        pipeline_parallel_size: Optional[int] = None,
+        disable_custom_all_reduce: bool = False,
+        sampling_steps: Optional[int] = 50,
+        scheduler_type: Optional[str] = None,
+        seed: int = 1,
+        scheduler_steps: int = 1000,
         scheduler_config: Optional[Dict[str, Any]] = None,
         **kwargs
     ) -> None:
-
-        engine_args = ContinuityArgsParser(
+        self.engine_args = ContinuityArgsParser(
             model=model,
             scheduler=scheduler,
             text_encoder=text_encoder,
             text_encoder_2=text_encoder_2,
             tokenizer=tokenizer,
-            tokenizer=tokenizer_2,
+            tokenizer_2=tokenizer_2,
             dtype=dtype,
             quantization=quantization,
             seed=seed,
@@ -97,76 +98,63 @@ class Diffusion:
             sampling_steps=sampling_steps,
             scheduler_type=scheduler_type,
             scheduler_steps=scheduler_steps,
-            **kwargs
+            scheduler_config=scheduler_config or {},
+            kwargs=kwargs
         )
 
         self.diffusion_engine = DiffusionEngine.from_engine_args(
-            engine_args, usage_context=UsageContext.TBD)
-
+            self.engine_args, usage_context="TBD"
+        )
         self.request_counter = Counter()
 
-    ## add similar stuff for text encoder
-    def get_tokenizer(self) -> AnyTokenizer:
+    def get_tokenizer(self) -> Any:
+        """Retrieve the tokenizer from the diffusion engine."""
         return self.diffusion_engine.get_tokenizer_group(TokenizerGroup).tokenizer
 
-    def set_tokenizer(self, tokenizer: AnyTokenizer) -> None:
-        tokenizer_group = self.diffusion_engine.get_tokenizer_group(TokenizerGroup)
-
-        # While CachedTokenizer is dynamic, have no choice but
-        # compare class name. Misjudgment will arise from
-        # user-defined tokenizer started with 'Cached'
+    def set_tokenizer(self, tokenizer: Any) -> None:
+        """Set a tokenizer, with caching logic if required."""
+        group = self.diffusion_engine.get_tokenizer_group(TokenizerGroup)
         if tokenizer.__class__.__name__.startswith("Cached"):
-            tokenizer_group.tokenizer = tokenizer
+            group.tokenizer = tokenizer
         else:
-            tokenizer_group.tokenizer = get_cached_tokenizer(tokenizer)
+            group.tokenizer = get_cached_tokenizer(tokenizer)
 
     def generate(
         self,
-        prompt: Union[Union[PromptType, SequenceType]],
-        prompt_token_ids: Optional[Union[List[int], List[List[int]]]],
+        prompt: Union[str, Sequence[str]],
+        prompt_token_ids: Optional[Union[List[int], List[List[int]]]] = None,
         use_tqdm: bool = True,
-        prioroty: Optional[List[int]] = None,
-    ) -> List[RequestOutput]:
-
+        priority: Optional[List[int]] = None,
+    ) -> List[Any]:
         """
-        Generates the outputs for the input conditions using a diffusion model.
-        This method automatically batches the given conditions (e.g., text prompts, image conditions), considering memory constraints. For the best performance, input all your conditions into a single list and pass it to this method.
+        Generate images from given prompts using the diffusion model.
 
         Args:
-            prompt: 
-                The prompts to the Diffusion. You may pass a sequence of prompts for batch inference.
-            num_inference_steps: The number of diffusion steps to run for inference. More steps typically yield higher quality outputs but require more computation.
-            guidance_scale: 
-                For guided diffusion models (e.g., classifier-free guidance), this controls the trade-off between fidelity to the condition (prompt) and the diversity of the output.
-            height (`int`, *optional*, defaults to self.unet.config.sample_size * self.vae_scale_factor):
-                The height in pixels of the generated image. This is set to 1024 by default for the best results.
-                Anything below 512 pixels won't work well for checkpoints that are not specifically fine-tuned on low resolutions.
-            width (`int`, *optional*, defaults to self.unet.config.sample_size * self.vae_scale_factor):
-                The width in pixels of the generated image. This is set to 1024 by default for the best results.
-                Anything below 512 pixels won't work well for checkpoints that are not specifically fine-tuned on low resolutions.
-            num_inference_steps (`int`, *optional*, defaults to 50):
-                The number of denoising steps. More denoising steps usually lead to a higher quality image at the
-                expense of slower inference.
-            seed: 
-                The seed for the random number generator, ensuring reproducibility of the diffusion process.
-            use_tqdm: 
-                Whether to use a progress bar (via tqdm) to display the status of the diffusion process.
-            priority: 
-                The priority of the requests, which may be useful in cases where multiple generations are queued. If a priority scheduling policy is enabled, this parameter can ensure that certain requests are prioritized over others.
+            prompt: Input prompts or batch of prompts.
+            prompt_token_ids: Optional token IDs corresponding to the prompts.
+            use_tqdm: Whether to display a progress bar.
+            priority: Optional list of priorities for batch requests.
 
         Returns:
-            A list of ``RequestOutput`` objects containing the
-            generated completions in the same order as the input prompts.
-
+            A list of generated outputs.
         """
-
         outputs = self._run_engine(use_tqdm=use_tqdm)
         return DiffusionEngine.validate_outputs(outputs, RequestOutput)
 
-    def _run_engine(
-        self, *, use_tqdm: bool
-    ) -> List[Union[RequestOutput, EmbeddingRequestOutput]]:
+    def _run_engine(self, *, use_tqdm: bool) -> List[Union[Any, EmbeddingRequestOutput]]:
+        """Internal method to execute the engine logic."""
+        num_requests = self.diffusion_engine.do_something()
+        outputs = [RequestOutput(request_id=i) for i in range(num_requests)]
         if use_tqdm:
-            num_requests = self.diffusion_engine.do_something()
-
+            outputs = list(tqdm(outputs, desc="Generating outputs"))
         return sorted(outputs, key=lambda x: int(x.request_id))
+
+@dataclass
+class RequestOutput:
+    """Represents the output of a single generation request."""
+    request_id: int
+
+def get_cached_tokenizer(tokenizer: Any) -> Any:
+    # Logic for retrieving or caching tokenizers
+    pass
+
