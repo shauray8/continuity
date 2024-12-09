@@ -1,3 +1,4 @@
+## just for comparission accross all the kernels for every component in flux model (temp)
 import torch
 import torch.nn as nn
 
