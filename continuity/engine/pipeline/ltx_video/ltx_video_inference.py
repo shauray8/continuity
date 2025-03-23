@@ -95,6 +95,20 @@ class LITXVideoPipeline(DiffusionPipeline):
             conditioning_mask = torch.cat([conditioning_mask]*num_conds)
         functional_coords = pixel_coords.to(torch.float32)
         functional_coords[:,0]=fractional_coords[;,0]*(1.0/frame_rate)
+        
+        retrieve_tiesteps_kwargs = {}
+        if isinstance(self.scheduler, TimestepShifter):
+            retrieve_timesteps_kwargs["samples"]=latents
+        timesteps, num_inference_steps = retrieve_timesteps(self.scheduler, num_inference_steps, device_timsteps, **retrieve_timesteps_kwargs)
+        extra_step_kwargs = self.prepare_Extra_step_kwarfs(generator, eta)
+
+        num_warmup_steps = max(len(timesteps)-num_inference_steps*self.sheduler.order, 0)
+
+        with self.progress_bar(total=num_inference_steps) as progress_bar:
+            for i,t in enumerate(timesteps):
+                if conditioning_mask is not None and image_cond_noise_scale>0.0:
+                    latents=self.add_noise_to_image_conditioning_latents(t, init_latents, latents, image_cond_noise_scale, orig_conditioning_mask, generator, )
+                    latent_model_input = (torch.cat([latents]*num_conds) if num_conds>1 else latents)
 
 
 
