@@ -110,10 +110,92 @@ class LITXVideoPipeline(DiffusionPipeline):
                     latents=self.add_noise_to_image_conditioning_latents(t, init_latents, latents, image_cond_noise_scale, orig_conditioning_mask, generator, )
                     latent_model_input = (torch.cat([latents]*num_conds) if num_conds>1 else latents)
 
+                    current_timsteps = t
 
+                    if not torch.is_tensor(current_timestep):
+                        is_mps = latent_model_input.device.type = "mps"
+                        if isinstance(current_timestep, float):
+                            dtype = torch.float32 if is_mps else torch.float64
+                        else:
+                            dtype = torch.int32 if is_mps else torch.int64
+                        current_timestep = torch.tensor([current_timestep], dtype=dtype,device=latent_model_input.device,)
+                    elif len(current_timestep.shape) == 0:
+                        current_timestep = current_timestep[None].to(letent_model_input.device)
 
+                    current_timestep = current_timestep.expand(latent_model_input.shape[0]).unsqueeze(-1)
 
+                    if condition_mask is not None:
+                        current_timestep = torch.min(current_timestep, 1.0-condition_mask)
 
+                    with context_manager:
+                        noise_pred = self.transformer(latent_model_input.to(self.transformer.dtype), indices_grid=fraction_coords, encoder_hidden_states=prompt_embeds_batch.to(self.transformer.dtype), encoder_attention_mask=prompt_attention_mask_batch, timestep=current_timestep, skip_layer_mask=skip_layer_mask, skip_layer_strategy=skip_layer_strategy, return_dict=False,)[0]
 
+                    if do_spatio_temporal_guidance:
+                    noise_pred_text, noise_pred_text_perturb = noise_pred.chunk(
+                        num_conds
+                    )[-2:]
 
+                    if do_classifier_free_guidance:
+                        noise_pred_uncond, noise_pred_text = noise_pred.chunk(num_conds)[:2]
+                        noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
+                    elif do_spatio_temporal_guidance: noise_pred = noise_pred_text
+                    if do_spatio_temporal_guidance:
+                        noise_pred = noise_pred + stg_scale * (noise_pred_text - noise_pred_text_perturb)
+                        if do_rescaling:
+                            noise_pred_text_std = noise_pred_text.view(batch_size, -1).std(dim=1, keepdim=True)
+                            noise_pred_std = noise_pred.view(batch_size, -1).std(dim=1, keepdim=True)
 
+                            factor = noise_pred_text_std / noise_pred_std
+                            factor = rescaling_scale * factor + (1 - rescaling_scale)
+
+                            noise_pred = noise_pred * factor.view(batch_size, 1, 1)
+
+                    current_timestep = current_timestep[:1]
+                    if (
+                        self.transformer.config.out_channels // 2
+                        == self.transformer.config.in_channels
+                    ):
+                        noise_pred = noise_pred.chunk(2, dim=1)[0]
+
+                    latents = self.denoising_step( latents,noise_pred,current_timestep,orig_conditioning_mask,t,extra_step_kwargs,)
+
+                    if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
+                        progress_bar.update()
+
+                    if callback_on_step_end is not None: callback_on_step_end(self, i, t, {})
+
+            if offload_to_cpu:
+                self.transformer = self.transformer.cpu()
+                if self._execution_device == "cuda": torch.cuda.empty_cache()
+
+            latents = latents[:, num_cond_latents:]
+
+            latents = self.patchifier.unpatchify(latents=latents,output_height=latent_height,output_width=latent_width,out_channels=self.transformer.in_channels // math.prod(self.patchifier.patch_size),)
+            if output_type != "latent":
+                if self.vae.decoder.timestep_conditioning:
+                    noise = torch.randn_like(latents)
+                    if not isinstance(decode_timestep, list):
+                        decode_timestep = [decode_timestep] * latents.shape[0]
+                    if decode_noise_scale is None:
+                        decode_noise_scale = decode_timestep
+                    elif not isinstance(decode_noise_scale, list):
+                        decode_noise_scale = [decode_noise_scale] * latents.shape[0]
+
+                    decode_timestep = torch.tensor(decode_timestep).to(latents.device)
+                    decode_noise_scale = torch.tensor(decode_noise_scale).to(latents.device)[:, None, None, None, None]
+                    latents = (latents * (1 - decode_noise_scale) + noise * decode_noise_scale)
+                else:
+                    decode_timestep = None
+                image = vae_decode(latents,self.vae,is_video, vae_per_channel_normalize=kwargs["vae_per_channel_normalize"], timestep=decode_timestep,)
+                image = self.image_processor.postprocess(image, output_type=output_type)
+
+            else:
+                image = latents
+
+            # Offload all models
+            self.maybe_free_model_hooks()
+
+            if not return_dict:
+                return (image,)
+
+            return ImagePipelineOutput(images=image)
