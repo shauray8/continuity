@@ -1,6 +1,10 @@
 import os 
 import torch 
 
+from ....utils.loading_utils import cqdm
+from ...models.transformer import ZonosTransformer
+
+
 class ZonosPipeline(nn.Module):
     def __init__(self, config: ZonosConfig):
         super().__init__()
