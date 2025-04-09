@@ -1,3 +1,12 @@
+<div align="center">
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="/docs/continuity_logo.svg">
+  <img alt="tiny corp logo" src="/docs/continuity_logo.svg" width="20%" height="20%">
+</picture>
+
+</div>
+
 ## Continuity
 Continuity is a no-nonsense, blazingly fast framework for running and training diffusion models like LTX-Video and WAN2.1. We’ve crammed it with custom Cutlass kernels that make your GPU sing, optimized specifically for whatever silicon you’re packing. Sick of sluggish inference or training? This is your ticket out.
 
