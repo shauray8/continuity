@@ -195,7 +195,7 @@ class ZonosPipeline(nn.Module):
         return self.device.type == "cuda" and "_mamba_ssm" in str(self.backbone.__class__)
 
     @torch.inference_mode()
-    def generate(
+    def __call__(
         self,
         prefix_conditioning: torch.Tensor,  # [bsz, cond_seq_len, d_model]
         audio_prefix_codes: torch.Tensor | None = None,  # [bsz, 9, prefix_audio_seq_len]
@@ -248,7 +248,7 @@ class ZonosPipeline(nn.Module):
         stopping = torch.zeros(batch_size, dtype=torch.bool, device=device)
         max_steps = delayed_codes.shape[2] - offset
         remaining_steps = torch.full((batch_size,), max_steps, device=device)
-        progress= cqdm(total=max_steps, desc="Generating", disable=not progress_bar)
+        progress = cqdm(total=max_steps, desc="Generating", disable=not progress_bar)
         cfg_scale = torch.tensor(cfg_scale)
 
         step = 0
