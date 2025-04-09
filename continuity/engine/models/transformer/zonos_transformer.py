@@ -4,6 +4,7 @@ import torch.nn as nn
 from torch.nn import functional as F
 
 from zonos.config import BackboneConfig, InferenceParams
+from ..Attention import ZonosAttentionBlock
 
 
 def precompute_freqs_cis(seq_len: int, n_elem: int, base: float = 10000) -> torch.Tensor:
@@ -14,26 +15,38 @@ def precompute_freqs_cis(seq_len: int, n_elem: int, base: float = 10000) -> torc
     cache = torch.stack([freqs_cis.real, freqs_cis.imag], dim=-1)
     return cache
 
-def _update_kv_cache(
-    k: torch.Tensor, v: torch.Tensor, inference_params: InferenceParams, layer_idx: int
-) -> torch.Tensor:
-    """k/v: (batch_size, seqlen, nheads, head_dim) or (batch_size, 1, nheads, head_dim)"""
-    assert layer_idx in inference_params.key_value_memory_dict
-    kv_cache, _ = inference_params.key_value_memory_dict[layer_idx]
-    # Adjust key and value for inference
-    batch_start = inference_params.batch_size_offset
-    batch_end = batch_start + k.shape[0]
-    sequence_start = inference_params.seqlen_offset
-    sequence_end = sequence_start + k.shape[1]
-    assert batch_end <= kv_cache.shape[0]
-    assert sequence_end <= kv_cache.shape[1]
-    assert kv_cache is not None
-    kv_cache[batch_start:batch_end, sequence_start:sequence_end, 0, ...] = k
-    kv_cache[batch_start:batch_end, sequence_start:sequence_end, 1, ...] = v
-    return kv_cache[batch_start:batch_end, :sequence_end, ...]
+class FeedForward(nn.Module):
+    def __init__(self, config: BackboneConfig) -> None:
+        super().__init__()
+        self.fc1 = nn.Linear(config.d_model, 2 * config.attn_mlp_d_intermediate, bias=False)
+        self.fc2 = nn.Linear(config.attn_mlp_d_intermediate, config.d_model, bias=False)
 
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        y, gate = self.fc1(x).chunk(2, dim=-1)
+        return self.fc2(y * F.silu(gate))
 
-class TorchZonosBackbone(nn.Module):
+class TransformerBlock(nn.Module):
+    def __init__(self, config: BackboneConfig, layer_idx: int) -> None:
+        super().__init__()
+        self.config = config
+
+        self.norm = nn.LayerNorm(config.d_model, eps=config.norm_epsilon)
+        self.mixer = ZonosAttentionBlock(config, layer_idx)
+        self.norm2 = nn.LayerNorm(config.d_model, eps=config.norm_epsilon)
+        self.mlp = FeedForward(config)
+
+        self.num_heads_kv = config.attn_cfg["num_heads_kv"]
+        self.head_dim = config.d_model // config.attn_cfg["num_heads"]
+
+    def allocate_inference_cache(self, batch_size: int, max_seqlen: int, dtype: torch.dtype = torch.bfloat16):
+        return torch.empty(batch_size, max_seqlen, 2, self.num_heads_kv, self.head_dim, dtype=dtype), None
+
+    def forward(self, x: torch.Tensor, inference_params: InferenceParams, freqs_cis: torch.Tensor) -> torch.Tensor:
+        x = x + self.mixer(self.norm(x), inference_params, freqs_cis)
+        x = x + self.mlp(self.norm2(x))
+        return x
+
+class ZonosTransformer(nn.Module):
     supported_architectures = ["transformer"]
     freqs_cis: torch.Tensor
 
@@ -63,34 +76,3 @@ class TorchZonosBackbone(nn.Module):
             hidden_states = layer(hidden_states, inference_params, freqs_cis)
         return self.norm_f(hidden_states)
 
-
-class TransformerBlock(nn.Module):
-    def __init__(self, config: BackboneConfig, layer_idx: int) -> None:
-        super().__init__()
-        self.config = config
-
-        self.norm = nn.LayerNorm(config.d_model, eps=config.norm_epsilon)
-        self.mixer = Attention(config, layer_idx)
-        self.norm2 = nn.LayerNorm(config.d_model, eps=config.norm_epsilon)
-        self.mlp = FeedForward(config)
-
-        self.num_heads_kv = config.attn_cfg["num_heads_kv"]
-        self.head_dim = config.d_model // config.attn_cfg["num_heads"]
-
-    def allocate_inference_cache(self, batch_size: int, max_seqlen: int, dtype: torch.dtype = torch.bfloat16):
-        return torch.empty(batch_size, max_seqlen, 2, self.num_heads_kv, self.head_dim, dtype=dtype), None
-
-    def forward(self, x: torch.Tensor, inference_params: InferenceParams, freqs_cis: torch.Tensor) -> torch.Tensor:
-        x = x + self.mixer(self.norm(x), inference_params, freqs_cis)
-        x = x + self.mlp(self.norm2(x))
-        return x
-
-class FeedForward(nn.Module):
-    def __init__(self, config: BackboneConfig) -> None:
-        super().__init__()
-        self.fc1 = nn.Linear(config.d_model, 2 * config.attn_mlp_d_intermediate, bias=False)
-        self.fc2 = nn.Linear(config.attn_mlp_d_intermediate, config.d_model, bias=False)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        y, gate = self.fc1(x).chunk(2, dim=-1)
-        return self.fc2(y * F.silu(gate))
