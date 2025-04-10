@@ -225,3 +225,4 @@ def get_device() -> torch.device:
 
 
 DEFAULT_DEVICE = get_device()
+
