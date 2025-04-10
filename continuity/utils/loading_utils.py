@@ -60,9 +60,3 @@ class tqdm(Generic[T]):
     print(bar[:ncols+1], flush=True, end='\n'*close, file=sys.stderr)
   @classmethod
   def write(cls, s:str): print(f"\r\033[K{s}", flush=True, file=sys.stderr)
-
-
-if __name__ == "__main__":
-    for _ in tqdm(range(20), "BENCHMARK RUN"):
-        import time
-        time.sleep(.1)
