@@ -7,8 +7,7 @@ import torch.nn.functional as F
 import torchaudio
 from huggingface_hub import hf_hub_download
 
-from zonos.utils import DEFAULT_DEVICE
-
+DEFAULT_DEVICE = "cuda:0"
 
 class logFbankCal(nn.Module):
     def __init__(
@@ -410,3 +409,4 @@ class SpeakerEmbeddingLDA(nn.Module):
     def forward(self, wav: torch.Tensor, sample_rate: int):
         emb = self.model(wav, sample_rate).to(torch.float32)
         return emb, self.lda(emb)
+
