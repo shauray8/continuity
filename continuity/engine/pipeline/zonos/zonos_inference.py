@@ -1,22 +1,89 @@
 import os 
 import torch 
+import torch.nn as nn
+from dataclasses import dataclass, field
+from typing import Literal, Callable
+from huggingface_hub import hf_hub_download
+import json
+import safetensors
 
 from .zonos_utils import find_multiple, pad_weight_, sample_from_logits, apply_delay_pattern, revert_delay_pattern
-from .zonos.conditioning import PrefixConditioner
-from ...models.transformer import ZonosTransformer
-from ...models.autoencoder import DACAutoencoder 
+from .zonos_conditioning import PrefixConditioner
+from continuity.engine.models.transformer import ZonosTransformer
+from continuity.engine.models.autoencoder.zonos_autoencoder import DACAutoencoder 
 from ...models import SpeakerEmbeddingLDA
-from ....utils.loading_utils import cqdm
+from ....utils.loading_utils import tqdm
+from ....utils.logging_utils import DiffusionLogger, LogLevel
+
+logger = DiffusionLogger(level=LogLevel.DEBUG)
+
+DEFAULT_DEVICE = "cuda:0"
+@dataclass
+class BackboneConfig:
+    d_model: int = 1024
+    d_intermediate: int = 0
+    attn_mlp_d_intermediate: int = 0
+    n_layer: int = 16
+    ssm_cfg: dict = field(default_factory=dict)
+    attn_layer_idx: list = field(default_factory=list)
+    attn_cfg: dict = field(default_factory=dict)
+    rms_norm: bool = False
+    residual_in_fp32: bool = False
+    norm_epsilon: float = 1e-5
+
+@dataclass
+class PrefixConditionerConfig:
+    conditioners: list[dict]
+    projection: Literal["none", "linear", "mlp"]
+
+@dataclass
+class InferenceParams:
+    """Inference parameters that are passed to the main model in order
+    to efficienly calculate and store the context during inference."""
+
+    max_seqlen: int
+    max_batch_size: int
+    seqlen_offset: int = 0
+    batch_size_offset: int = 0
+    key_value_memory_dict: dict = field(default_factory=dict)
+    lengths_per_sample: torch.Tensor | None = None
+
+    def reset(self, max_seqlen, max_batch_size):
+        self.max_seqlen = max_seqlen
+        self.max_batch_size = max_batch_size
+        self.seqlen_offset = 0
+        if self.lengths_per_sample is not None:
+            self.lengths_per_sample.zero_()
+
+
+
+@dataclass
+class ZonosConfig:
+    backbone: BackboneConfig
+    prefix_conditioner: PrefixConditionerConfig
+    eos_token_id: int = 1024
+    masked_token_id: int = 1025
+    pad_vocab_to_multiple_of: int = 8
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "ZonosConfig":
+        d = d.copy()
+        backbone_config = BackboneConfig(**d.pop("backbone"))
+        prefix_conditioner_config = PrefixConditionerConfig(**d.pop("prefix_conditioner"))
+        config = cls(backbone_config, prefix_conditioner_config, **d)
+        return config
 
 class ZonosPipeline(nn.Module):
     def __init__(self, config: ZonosConfig):
         super().__init__()
+        self.logger = DiffusionLogger()
         self.config = config
         self.eos_token_id = config.eos_token_id
         self.masked_token_id = config.masked_token_id
+        dim = config.backbone.d_model
 
         self.autoencoder = DACAutoencoder()
-        self.backbone = ZonosTransformer
+        self.backbone = ZonosTransformer(config.backbone)
         self.prefix_conditioner = PrefixConditioner(config.prefix_conditioner, dim)
         self.spk_clone_model = None
 
@@ -42,9 +109,11 @@ class ZonosPipeline(nn.Module):
         return next(self.parameters())._execution_device()
 
     @classmethod
-    def from_pretrained(cls, repo_id: str, revision: str, | None = None, execution_device: str = DEFAULT_DEVICE, **kwargs) -> "Zonoe":
-        config_path = hf_hub_download(repo_id=repo_id, finename="config.json")
-        model_path = hf_hub_download(repo_id=repo_id, finename="model.safetensors", revision=revision)
+    def from_pretrained(
+        cls, repo_id: str, revision: str | None = None, device: str = DEFAULT_DEVICE, **kwargs
+    ) -> "Zonos":
+        config_path = hf_hub_download(repo_id=repo_id, filename="config.json")
+        model_path = hf_hub_download(repo_id=repo_id, filename="model.safetensors", revision=revision)
         return cls.from_local(config_path, model_path, device, **kwargs)
 
     @classmethod
@@ -52,9 +121,8 @@ class ZonosPipeline(nn.Module):
         cls, config_path: str, model_path: str, device: str = DEFAULT_DEVICE, backbone: str | None = None
     ) -> "Zonos":
         config = ZonosConfig.from_dict(json.load(open(config_path)))
-            backbone_cls = ZonosTransformer
 
-        model = cls(config, backbone_cls).to(device, torch.bfloat16)
+        model = cls(config).to(device, torch.bfloat16)
         model.autoencoder.dac.to(device)
 
         sd = model.state_dict()
@@ -64,7 +132,6 @@ class ZonosPipeline(nn.Module):
         model.load_state_dict(sd)
 
         return model
-
     def make_speaker_embedding(self, wav: torch.Tensor, sr: int) -> torch.Tensor:
         """Generate a speaker embedding from an audio clip."""
         if self.spk_clone_model is None:
@@ -190,10 +257,6 @@ class ZonosPipeline(nn.Module):
             ]
         )
 
-    def can_use_cudagraphs(self) -> bool:
-        # Only the mamba-ssm backbone supports CUDA Graphs at the moment
-        return self.device.type == "cuda" and "_mamba_ssm" in str(self.backbone.__class__)
-
     @torch.inference_mode()
     def __call__(
         self,
@@ -209,10 +272,10 @@ class ZonosPipeline(nn.Module):
     ):
         assert cfg_scale != 1, "TODO: add support for cfg_scale=1"
         prefix_audio_len = 0 if audio_prefix_codes is None else audio_prefix_codes.shape[2]
-        device = self.device
+        device = "cuda:0"
 
         # Use CUDA Graphs if supported, and torch.compile otherwise.
-        cg = self.can_use_cudagraphs()
+        cg = False
         decode_one_token = self._decode_one_token
         decode_one_token = torch.compile(decode_one_token, dynamic=True, disable=cg or disable_torch_compile)
 
@@ -248,7 +311,7 @@ class ZonosPipeline(nn.Module):
         stopping = torch.zeros(batch_size, dtype=torch.bool, device=device)
         max_steps = delayed_codes.shape[2] - offset
         remaining_steps = torch.full((batch_size,), max_steps, device=device)
-        progress = cqdm(total=max_steps, desc="Generating", disable=not progress_bar)
+        progress = tqdm(range(max_steps), desc="Generating")
         cfg_scale = torch.tensor(cfg_scale)
 
         step = 0
@@ -292,3 +355,4 @@ class ZonosPipeline(nn.Module):
         self._cg_graph = None  # reset cuda graph to avoid cache changes
 
         return out_codes
+
