@@ -3,10 +3,16 @@ from typing import Any, Literal, Iterable
 
 import torch
 import torch.nn as nn
+from dataclasses import dataclass, field
 
-from zonos.config import PrefixConditionerConfig
-from zonos.utils import DEFAULT_DEVICE
 
+@dataclass
+class PrefixConditionerConfig:
+    conditioners: list[dict]
+    projection: Literal["none", "linear", "mlp"]
+
+
+DEFAULT_DEVICE = "cuda:0"
 class Conditioner(nn.Module):
     def __init__(
         self,
@@ -397,3 +403,4 @@ def make_cond_dict(
             cond_dict[k] /= cond_dict[k].sum(dim=-1)
 
     return cond_dict
+
