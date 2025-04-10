@@ -1,6 +1,39 @@
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
+from dataclasses import dataclass, field
+
+@dataclass
+class InferenceParams:
+    """Inference parameters that are passed to the main model in order
+    to efficienly calculate and store the context during inference."""
+
+    max_seqlen: int
+    max_batch_size: int
+    seqlen_offset: int = 0
+    batch_size_offset: int = 0
+    key_value_memory_dict: dict = field(default_factory=dict)
+    lengths_per_sample: torch.Tensor | None = None
+
+    def reset(self, max_seqlen, max_batch_size):
+        self.max_seqlen = max_seqlen
+        self.max_batch_size = max_batch_size
+        self.seqlen_offset = 0
+        if self.lengths_per_sample is not None:
+            self.lengths_per_sample.zero_()
+@dataclass
+class BackboneConfig:
+    d_model: int = 1024
+    d_intermediate: int = 0
+    attn_mlp_d_intermediate: int = 0
+    n_layer: int = 16
+    ssm_cfg: dict = field(default_factory=dict)
+    attn_layer_idx: list = field(default_factory=list)
+    attn_cfg: dict = field(default_factory=dict)
+    rms_norm: bool = False
+    residual_in_fp32: bool = False
+    norm_epsilon: float = 1e-5
+
 
 def apply_rotary_emb(x: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor:
     xshaped = x.float().reshape(*x.shape[:-1], -1, 2)
@@ -59,3 +92,4 @@ class ZonosAttentionBlock(nn.Module):
         y = y.transpose(1, 2).contiguous().view(batch_size, seqlen, q_size)
         y = self.out_proj(y)
         return y
+
