@@ -2,10 +2,40 @@
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
+from dataclasses import dataclass, field
+from typing import Literal
 
-from zonos.config import BackboneConfig, InferenceParams
+
 from ..attention import ZonosAttentionBlock
 
+@dataclass
+class BackboneConfig:
+    d_model: int = 1024
+    d_intermediate: int = 0
+    attn_mlp_d_intermediate: int = 0
+    n_layer: int = 16
+    ssm_cfg: dict = field(default_factory=dict)
+    attn_layer_idx: list = field(default_factory=list)
+    attn_cfg: dict = field(default_factory=dict)
+    rms_norm: bool = False
+    residual_in_fp32: bool = False
+    norm_epsilon: float = 1e-5
+
+@dataclass
+class InferenceParams:
+    max_seqlen: int
+    max_batch_size: int
+    seqlen_offset: int = 0
+    batch_size_offset: int = 0
+    key_value_memory_dict: dict = field(default_factory=dict)
+    lengths_per_sample: torch.Tensor | None = None
+
+    def reset(self, max_seqlen, max_batch_size):
+        self.max_seqlen = max_seqlen
+        self.max_batch_size = max_batch_size
+        self.seqlen_offset = 0
+        if self.lengths_per_sample is not None:
+            self.lengths_per_sample.zero_()
 
 def precompute_freqs_cis(seq_len: int, n_elem: int, base: float = 10000) -> torch.Tensor:
     freqs = 1.0 / (base ** (torch.arange(0, n_elem, 2)[: (n_elem // 2)].float() / n_elem))
@@ -75,4 +105,5 @@ class ZonosTransformer(nn.Module):
         for i, layer in enumerate(self.layers):
             hidden_states = layer(hidden_states, inference_params, freqs_cis)
         return self.norm_f(hidden_states)
+
 
